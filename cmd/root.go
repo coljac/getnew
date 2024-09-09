@@ -23,6 +23,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,8 +33,8 @@ import (
 )
 
 var (
-	sourceDir string
-	nthNewest int
+	sourceDir  string
+	nthNewest  int
 	fileFilter string
 )
 
@@ -98,6 +99,10 @@ func moveNthNewestFile() error {
 		}
 	}
 
+	return moveFile(sourceDir, regularFiles, nthNewest, fileFilter)
+}
+
+func moveFile(sourceDir string, regularFiles []os.FileInfo, nthNewest int, fileFilter string) error {
 	if len(regularFiles) == 0 {
 		if fileFilter != "" {
 			return fmt.Errorf("no files matching '%s' found in the source directory", fileFilter)
@@ -117,10 +122,38 @@ func moveNthNewestFile() error {
 	sourcePath := filepath.Join(sourceDir, fileToMove.Name())
 	destPath := filepath.Join(".", fileToMove.Name())
 
-	if err := os.Rename(sourcePath, destPath); err != nil {
-		return fmt.Errorf("failed to move file: %w", err)
+	// Open the source file
+	sourceFile, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer sourceFile.Close()
+
+	// Create the destination file
+	destFile, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer destFile.Close()
+
+	// Copy the contents from source to destination
+	if _, err := io.Copy(destFile, sourceFile); err != nil {
+		return fmt.Errorf("failed to copy file: %w", err)
 	}
 
-	fmt.Printf("Moved %s to current directory\n", fileToMove.Name())
+	// Close the files
+	if err := sourceFile.Close(); err != nil {
+		return fmt.Errorf("failed to close source file: %w", err)
+	}
+	if err := destFile.Close(); err != nil {
+		return fmt.Errorf("failed to close destination file: %w", err)
+	}
+
+	// Remove the original file
+	if err := os.Remove(sourcePath); err != nil {
+		return fmt.Errorf("failed to remove original file: %w", err)
+	}
+
+	fmt.Printf("%s\n", fileToMove.Name())
 	return nil
 }

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -36,6 +37,7 @@ var (
 	sourceDir  string
 	nthNewest  int
 	fileFilter string
+	unarchive  bool
 )
 
 var rootCmd = &cobra.Command{
@@ -57,6 +59,12 @@ Optionally, provide a filter argument to match files partially.`,
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+		if unarchive {
+			if err := unarchiveFile(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unarchiving: %v\n", err)
+				os.Exit(1)
+			}
+		}
 	},
 }
 
@@ -70,6 +78,7 @@ func Execute() {
 func init() {
 	rootCmd.Flags().StringVarP(&sourceDir, "source", "s", "", "Source directory (overrides GETNEW_SOURCE_DIR)")
 	rootCmd.Flags().IntVarP(&nthNewest, "nth", "n", 1, "Nth newest file to move (default is 1, the newest)")
+	rootCmd.Flags().BoolVarP(&unarchive, "unarchive", "z", false, "Unarchive the file if it's an archive (zip, gz, tar.gz, 7z)")
 
 	// Use environment variable if --source flag is not set
 	if sourceDir == "" {
@@ -156,4 +165,44 @@ func moveFile(sourceDir string, regularFiles []os.FileInfo, nthNewest int, fileF
 
 	fmt.Printf("%s\n", fileToMove.Name())
 	return nil
+}
+
+func unarchiveFile() error {
+	files, err := os.ReadDir(".")
+	if err != nil {
+		return fmt.Errorf("failed to read current directory: %w", err)
+	}
+
+	for _, file := range files {
+		ext := strings.ToLower(filepath.Ext(file.Name()))
+		var cmd *exec.Cmd
+
+		switch ext {
+		case ".zip":
+			cmd = exec.Command("unzip", file.Name())
+		case ".gz", ".tgz":
+			cmd = exec.Command("tar", "-xzf", file.Name())
+		case ".tar":
+			cmd = exec.Command("tar", "-xf", file.Name())
+		case ".7z":
+			cmd = exec.Command("7z", "x", file.Name())
+		default:
+			continue // Not a recognized archive format
+		}
+
+		if cmd != nil {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("failed to unarchive %s: %w", file.Name(), err)
+			}
+			if err := os.Remove(file.Name()); err != nil {
+				return fmt.Errorf("failed to remove original archive file: %w", err)
+			}
+			fmt.Printf("Unarchived and removed: %s\n", file.Name())
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no recognized archive file found in the current directory")
 }

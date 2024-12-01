@@ -24,6 +24,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,12 +56,13 @@ Optionally, provide a filter argument to match files partially.`,
 		if len(args) > 0 {
 			fileFilter = args[0]
 		}
-		if err := moveNthNewestFile(); err != nil {
+		err, fileinfo := moveNthNewestFile()
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		if unarchive {
-			if err := unarchiveFile(); err != nil {
+			if err := unarchiveFetchedFile(fileinfo); err != nil {
 				fmt.Fprintf(os.Stderr, "Error unarchiving: %v\n", err)
 				os.Exit(1)
 			}
@@ -89,10 +91,10 @@ func init() {
 	}
 }
 
-func moveNthNewestFile() error {
+func moveNthNewestFile() (error, fs.FileInfo) {
 	files, err := os.ReadDir(sourceDir)
 	if err != nil {
-		return fmt.Errorf("failed to read source directory: %w", err)
+		return fmt.Errorf("failed to read source directory: %w", err), nil
 	}
 
 	var regularFiles []os.FileInfo
@@ -100,7 +102,7 @@ func moveNthNewestFile() error {
 		if !file.IsDir() {
 			info, err := file.Info()
 			if err != nil {
-				return fmt.Errorf("failed to get file info: %w", err)
+				return fmt.Errorf("failed to get file info: %w", err), nil
 			}
 			if fileFilter == "" || strings.Contains(strings.ToLower(info.Name()), strings.ToLower(fileFilter)) {
 				regularFiles = append(regularFiles, info)
@@ -111,12 +113,12 @@ func moveNthNewestFile() error {
 	return moveFile(sourceDir, regularFiles, nthNewest, fileFilter)
 }
 
-func moveFile(sourceDir string, regularFiles []os.FileInfo, nthNewest int, fileFilter string) error {
+func moveFile(sourceDir string, regularFiles []os.FileInfo, nthNewest int, fileFilter string) (error, fs.FileInfo) {
 	if len(regularFiles) == 0 {
 		if fileFilter != "" {
-			return fmt.Errorf("no files matching '%s' found in the source directory", fileFilter)
+			return fmt.Errorf("no files matching '%s' found in the source directory", fileFilter), nil
 		}
-		return fmt.Errorf("no files found in the source directory")
+		return fmt.Errorf("no files found in the source directory"), nil
 	}
 
 	sort.Slice(regularFiles, func(i, j int) bool {
@@ -124,7 +126,7 @@ func moveFile(sourceDir string, regularFiles []os.FileInfo, nthNewest int, fileF
 	})
 
 	if nthNewest > len(regularFiles) {
-		return fmt.Errorf("requested %dth newest file, but only %d files available", nthNewest, len(regularFiles))
+		return fmt.Errorf("requested %dth newest file, but only %d files available", nthNewest, len(regularFiles)), nil
 	}
 
 	fileToMove := regularFiles[nthNewest-1]
@@ -134,75 +136,66 @@ func moveFile(sourceDir string, regularFiles []os.FileInfo, nthNewest int, fileF
 	// Open the source file
 	sourceFile, err := os.Open(sourcePath)
 	if err != nil {
-		return fmt.Errorf("failed to open source file: %w", err)
+		return fmt.Errorf("failed to open source file: %w", err), nil
 	}
 	defer sourceFile.Close()
 
 	// Create the destination file
 	destFile, err := os.Create(destPath)
 	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
+		return fmt.Errorf("failed to create destination file: %w", err), nil
 	}
 	defer destFile.Close()
 
 	// Copy the contents from source to destination
 	if _, err := io.Copy(destFile, sourceFile); err != nil {
-		return fmt.Errorf("failed to copy file: %w", err)
+		return fmt.Errorf("failed to copy file: %w", err), nil
 	}
 
 	// Close the files
 	if err := sourceFile.Close(); err != nil {
-		return fmt.Errorf("failed to close source file: %w", err)
+		return fmt.Errorf("failed to close source file: %w", err), nil
 	}
 	if err := destFile.Close(); err != nil {
-		return fmt.Errorf("failed to close destination file: %w", err)
+		return fmt.Errorf("failed to close destination file: %w", err), nil
 	}
 
 	// Remove the original file
 	if err := os.Remove(sourcePath); err != nil {
-		return fmt.Errorf("failed to remove original file: %w", err)
+		return fmt.Errorf("failed to remove original file: %w", err), nil
 	}
 
 	fmt.Printf("%s\n", fileToMove.Name())
-	return nil
+	return nil, fileToMove
 }
 
-func unarchiveFile() error {
-	files, err := os.ReadDir(".")
-	if err != nil {
-		return fmt.Errorf("failed to read current directory: %w", err)
+func unarchiveFetchedFile(file fs.FileInfo) error {
+	var cmd *exec.Cmd
+	switch filepath.Ext(file.Name()) {
+	case ".zip":
+		cmd = exec.Command("unzip", "-o", file.Name())
+	case ".gz", ".tgz":
+		cmd = exec.Command("tar", "-xzf", file.Name())
+	case ".tar":
+		cmd = exec.Command("tar", "-xf", file.Name())
+	case ".7z":
+		cmd = exec.Command("7z", "x", file.Name())
+	default:
+		return fmt.Errorf("not a recognized archive format: %s", file.Name())
 	}
 
-	for _, file := range files {
-		ext := strings.ToLower(filepath.Ext(file.Name()))
-		var cmd *exec.Cmd
-
-		switch ext {
-		case ".zip":
-			cmd = exec.Command("unzip", file.Name())
-		case ".gz", ".tgz":
-			cmd = exec.Command("tar", "-xzf", file.Name())
-		case ".tar":
-			cmd = exec.Command("tar", "-xf", file.Name())
-		case ".7z":
-			cmd = exec.Command("7z", "x", file.Name())
-		default:
-			continue // Not a recognized archive format
+	if cmd != nil {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to unarchive %s: %w", file.Name(), err)
 		}
-
-		if cmd != nil {
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("failed to unarchive %s: %w", file.Name(), err)
-			}
-			if err := os.Remove(file.Name()); err != nil {
-				return fmt.Errorf("failed to remove original archive file: %w", err)
-			}
-			fmt.Printf("Unarchived and removed: %s\n", file.Name())
-			return nil
+		if err := os.Remove(file.Name()); err != nil {
+			return fmt.Errorf("failed to remove original archive file: %w", err)
 		}
+		fmt.Printf("Unarchived and removed: %s\n", file.Name())
+		return nil
 	}
 
-	return fmt.Errorf("no recognized archive file found in the current directory")
+	return fmt.Errorf("no recognized archive file found")
 }
